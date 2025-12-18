@@ -3,11 +3,10 @@
 
 # Installation
 ## OpenCV, Pandas, NumPy 설치
-    ``` bash
+    
     pip install opencv-python pandas numpy
-    ```
 
 # Run
-    ```
+    
     python ./detector.py
-    ```
+    
