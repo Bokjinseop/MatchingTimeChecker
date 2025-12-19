@@ -27,7 +27,7 @@ def load_config(config_file='config.ini'):
         'start_second': s.getfloat('start_second', fallback=0.0)
     }
 
-def process_video_final(v_path, t_path, start_opt):
+def process_video_peak_fixed(v_path, t_path, start_opt):
     params = load_config()
     start_sec = start_opt if start_opt is not None else params['start_second']
     
@@ -64,14 +64,13 @@ def process_video_final(v_path, t_path, start_opt):
     with open(params['output_csv'], mode='w', newline='', encoding='utf-8-sig') as f:
         csv.writer(f).writerow(['Frame', 'Video_Timestamp', 'Elapsed_Time', 'Score'])
 
-    consecutive_count = 0
-    is_detecting = False
+    is_tracking_peak = False
+    peak_score = -1.0
+    peak_frame_info = {} 
     last_record_time_sec = -1.0
-    
-    # 프로그램 시작 시간 기록
     program_start_time = time.time()
 
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 분석 시작...")
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 분석 시작 (피크 탐색 및 추세 분석)...")
 
     while frame_idx < total_frames:
         if params['skip_frames'] > 0:
@@ -85,10 +84,7 @@ def process_video_final(v_path, t_path, start_opt):
         
         current_time_sec = frame_idx / fps
         video_ts = f"{int(current_time_sec // 60):02d}:{current_time_sec % 60:06.3f}"
-        
-        # 프로그램 가동 시간 계산 (Runtime)
-        runtime_sec = int(time.time() - program_start_time)
-        runtime_ts = str(timedelta(seconds=runtime_sec))
+        runtime_ts = str(timedelta(seconds=int(time.time() - program_start_time)))
         
         is_cooldown_over = last_record_time_sec < 0 or (current_time_sec - last_record_time_sec) >= params['cooldown_sec']
         frame_resized = cv2.resize(frame, (0, 0), fx=ratio, fy=ratio)
@@ -103,55 +99,63 @@ def process_video_final(v_path, t_path, start_opt):
             _, max_val, _, max_loc = cv2.minMaxLoc(res)
             top_left = (max_loc[0] + x, max_loc[1] + y) if use_roi else max_loc
 
+            # 피크 추적 로직
             if max_val >= params['threshold']:
-                consecutive_count += 1
-                status_text = f"MATCHED! ({max_val:.2f})"
-                box_color = (0, 0, 255) # 빨간색
-
-                if not is_detecting:
-                    elapsed = 0.0 if last_record_time_sec < 0 else (current_time_sec - last_record_time_sec)
-                    with open(params['output_csv'], mode='a', newline='', encoding='utf-8-sig') as f:
-                        csv.writer(f).writerow([frame_idx, video_ts, f"{elapsed:.3f}", round(max_val, 4)])
-                    
-                    is_detecting = True
-                    last_record_time_sec = current_time_sec
-                    print(f">>> [Runtime {runtime_ts}] [RECORDED] Video: {video_ts} | Score: {max_val:.4f}")
-
-                    if params['cooldown_sec'] > 0:
-                        jump_frame = int(frame_idx + (params['cooldown_sec'] * fps))
-                        if jump_frame < total_frames:
-                            cap.set(cv2.CAP_PROP_POS_FRAMES, jump_frame)
-                            frame_idx = jump_frame
-                            is_detecting = False
-                            consecutive_count = 0
-                            continue
-            else:
-                if consecutive_count >= params['min_frames']: is_detecting = False
-                consecutive_count = 0
+                if not is_tracking_peak:
+                    is_tracking_peak = True
+                    peak_score = max_val
+                    peak_frame_info = {'idx': frame_idx, 'vts': video_ts, 'score': max_val}
+                else:
+                    if max_val >= peak_score:
+                        peak_score = max_val
+                        peak_frame_info = {'idx': frame_idx, 'vts': video_ts, 'score': max_val}
+                
+                status_text = f"MATCHED! ({max_val:.2f}) ↑"
+                box_color = (0, 0, 255) # 상승 중엔 빨간색
+            
+            # 값이 꺾였을 때 기록 (추적 중이고 현재값이 이전 최고점보다 낮거나 임계값 미만일 때)
+            if is_tracking_peak and (max_val < peak_score or max_val < params['threshold']):
+                p_idx = peak_frame_info['idx']
+                p_vts = peak_frame_info['vts']
+                p_score = peak_frame_info['score']
+                p_sec = p_idx / fps # 오류 수정: peak_frame_info['vts_sec'] 대신 직접 계산
+                
+                elapsed = 0.0 if last_record_time_sec < 0 else (p_sec - last_record_time_sec)
+                
+                with open(params['output_csv'], mode='a', newline='', encoding='utf-8-sig') as f:
+                    csv.writer(f).writerow([p_idx, p_vts, f"{elapsed:.3f}", round(p_score, 4)])
+                
+                print(f">>> [Runtime {runtime_ts}] [RECORDED PEAK] Video: {p_vts} | Score: {p_score:.4f} | Elapsed: {elapsed:.3f}s")
+                
+                last_record_time_sec = p_sec
+                is_tracking_peak = False
+                peak_score = -1.0
+                
+                # 쿨타임 점프
+                if params['cooldown_sec'] > 0:
+                    jump_frame = int(frame_idx + (params['cooldown_sec'] * fps))
+                    if jump_frame < total_frames:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, jump_frame)
+                        frame_idx = jump_frame
+                        continue
+            
+            if not is_tracking_peak:
                 status_text = f"Searching... ({max_val:.2f})"
-                box_color = (0, 255, 255) # 노란색
+                box_color = (0, 255, 255)
         else:
             status_text = "SKIP (Cooldown)"
             box_color = (100, 100, 100)
 
-        # 화면 표시 (시각 효과 집중)
         if params['show_display']:
             display_frame = frame_resized.copy()
+            cv2.putText(display_frame, f"Runtime: {runtime_ts}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(display_frame, f"Video: {video_ts}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
             
-            # 1. 왼쪽 상단 정보 (프로그램 가동 시간 & 비디오 시간)
-            cv2.putText(display_frame, f"Runtime: {runtime_ts}", (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(display_frame, f"Video: {video_ts}", (10, 60), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-
-            # 2. 매칭 상태 및 사각형 표시
             if is_cooldown_over:
                 cv2.rectangle(display_frame, top_left, (top_left[0]+tw, top_left[1]+th), box_color, 2)
-                cv2.putText(display_frame, status_text, (top_left[0], top_left[1] - 10), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
+                cv2.putText(display_frame, status_text, (top_left[0], top_left[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
             else:
-                cv2.putText(display_frame, status_text, (10, 90), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 1)
+                cv2.putText(display_frame, status_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 1)
 
             cv2.imshow("Analysis", display_frame)
             if cv2.waitKey(1) & 0xFF == ord('q'): break
@@ -160,12 +164,12 @@ def process_video_final(v_path, t_path, start_opt):
 
     cap.release()
     cv2.destroyAllWindows()
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 분석 종료 (총 가동 시간: {runtime_ts})")
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 분석이 완료되었습니다.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--video", required=True)
     parser.add_argument("-t", "--template", required=True)
-    parser.add_argument("-s", "--start", type=float, help="시작 시간(초)")
+    parser.add_argument("-s", "--start", type=float)
     args = parser.parse_args()
-    process_video_final(args.video, args.template, args.start)
+    process_video_peak_fixed(args.video, args.template, args.start)
