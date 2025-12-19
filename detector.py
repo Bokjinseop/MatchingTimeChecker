@@ -110,7 +110,7 @@ def process_video_peak_fixed(v_path, t_path, start_opt):
                         peak_score = max_val
                         peak_frame_info = {'idx': frame_idx, 'vts': video_ts, 'score': max_val}
                 
-                status_text = f"MATCHED! ({max_val:.2f}) ↑"
+                status_text = f"MATCHED! ({max_val:.2f}) .."
                 box_color = (0, 0, 255) # 상승 중엔 빨간색
             
             # 값이 꺾였을 때 기록 (추적 중이고 현재값이 이전 최고점보다 낮거나 임계값 미만일 때)
